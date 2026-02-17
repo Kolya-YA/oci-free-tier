@@ -1,0 +1,9 @@
+[DEFAULT]
+# Required values – copy/paste into ./config and fill in from your OCI tenancy.
+user=ocid1.user.oc1..example_user
+fingerprint=12:34:56:78:90:ab:cd:ef:12:34:56:78:90:ab:cd:ef
+tenancy=ocid1.tenancy.oc1..example_tenancy
+region=eu-frankfurt-1
+key_file=/absolute/path/to/oci_api_key.pem
+# Optional: un-comment if your key uses a passphrase.
+#pass_phrase=<passphrase>
