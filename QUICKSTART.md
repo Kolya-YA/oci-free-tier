@@ -27,8 +27,10 @@ Edit `launch_config_local.py` and set:
 
 Optional tuning:
 - `SHAPE_CONFIG_PRIORITY`
-- `RETRY_BASE_DELAY`, `RETRY_MAX_DELAY`, `RETRY_JITTER_MAX`
+- `REQUEST_PACE_START_DELAY`, `REQUEST_PACE_MIN_DELAY`, `REQUEST_PACE_MAX_DELAY`
+- `REQUEST_PACE_DECREASE_FACTOR`, `REQUEST_PACE_INCREASE_FACTOR`, `THROTTLE_COOLDOWN_SECONDS`, `REQUEST_PACE_JITTER_MAX`
 - `STATE_CHECK_DELAY`, `MAX_STATE_WAIT_SECONDS`
+- `ENABLE_TUI`, `TUI_EVENT_LINES`
 
 ## 4. Run
 ```bash
@@ -38,9 +40,14 @@ Optional tuning:
 ## What the script does
 - Tries all configured ADs in rotation.
 - Tries shape configs in rotation (larger to smaller by default).
+- Uses `create_compute_capacity_report` pre-check for AD/shape capacity.
 - Retries only transient/capacity OCI failures.
-- Uses exponential backoff with jitter.
+- Uses adaptive pacing: faster until throttled, then backs off and cools down.
 - Waits for `RUNNING` with timeout + terminal-state checks.
+- Default pace profile: `8s` down to `0.8s`; on throttle interval increases by `x1.25`.
+- Uses single-screen TUI dashboard by default (disable via `ENABLE_TUI = False`).
+
+Note: repeated `500/InternalError` often means temporary OCI capacity shortage, not a bad config.
 
 ## Common checks
 ```bash

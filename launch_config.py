@@ -34,10 +34,19 @@ SHAPE_CONFIG_PRIORITY = [
     {"ocpus": 1, "memory_in_gbs": 6},
 ]
 
-# Retry tuning
-RETRY_BASE_DELAY = 12
-RETRY_MAX_DELAY = 120
-RETRY_JITTER_MAX = 3.0
+# Probe capacity with create_compute_capacity_report before launch attempts.
+USE_CAPACITY_REPORT = True
+
+# Adaptive request pacing:
+# - decreases delay while no throttling,
+# - increases delay on 429/TooManyRequests and keeps cooldown.
+REQUEST_PACE_START_DELAY = 8.0
+REQUEST_PACE_MIN_DELAY = 0.8
+REQUEST_PACE_MAX_DELAY = 20.0
+REQUEST_PACE_DECREASE_FACTOR = 0.75
+REQUEST_PACE_INCREASE_FACTOR = 1.25
+THROTTLE_COOLDOWN_SECONDS = 45.0
+REQUEST_PACE_JITTER_MAX = 0.3
 
 # Instance state polling
 STATE_CHECK_DELAY = 20
@@ -46,6 +55,8 @@ MAX_STATE_WAIT_SECONDS = 1800
 # Logging
 LOG_LEVEL = "INFO"
 LOG_FILE = "./logs/hunt.log"
+ENABLE_TUI = True
+TUI_EVENT_LINES = 8
 
 # Optional local overrides (ignored by git)
 try:
