@@ -8,7 +8,7 @@ import time
 import uuid
 from collections import deque
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import oci
 from oci.exceptions import RequestException, ServiceError
@@ -29,6 +29,8 @@ class TerminalUI:
         self.enabled = bool(enabled and sys.stdout.isatty())
         self._curses = None
         self._screen = None
+        self._initialized = False
+        self._closed = False
         self._last_render = 0.0
         self._start_time = time.monotonic()
         self._events: deque[str] = deque(maxlen=max(3, int(getattr(cfg, "TUI_EVENT_LINES", 8))))
@@ -55,14 +57,13 @@ class TerminalUI:
 
             self._curses = curses
             self._screen = curses.initscr()
+            self._initialized = True
             curses.noecho()
             curses.cbreak()
-            self._screen.nodelay(True)
             self._screen.keypad(True)
         except Exception:
             self.enabled = False
-            self._curses = None
-            self._screen = None
+            self.close()
 
     def set_state(self, **kwargs: Any) -> None:
         for key, value in kwargs.items():
@@ -128,9 +129,10 @@ class TerminalUI:
         except Exception:
             # If terminal rendering fails, disable TUI and continue in logging mode.
             self.enabled = False
+            self.close()
 
     def close(self) -> None:
-        if not self.enabled or self._screen is None or self._curses is None:
+        if self._closed or not self._initialized or self._screen is None or self._curses is None:
             return
         try:
             self._curses.nocbreak()
@@ -139,9 +141,14 @@ class TerminalUI:
             self._curses.endwin()
         except Exception:
             pass
+        finally:
+            self._closed = True
+            self._initialized = False
+            self._screen = None
+            self._curses = None
 
 
-ACTIVE_UI: TerminalUI | None = None
+ACTIVE_UI: Optional[TerminalUI] = None
 
 
 def _format_message(message: str, args: tuple[Any, ...]) -> str:
@@ -325,7 +332,7 @@ class RequestPacer:
         return self.current_delay + random.uniform(0.0, self.jitter_max)
 
 
-def pick_existing_instance(compute: oci.core.ComputeClient) -> str | None:
+def pick_existing_instance(compute: oci.core.ComputeClient) -> Optional[str]:
     """Return an already-existing active instance id for configured display name."""
     try:
         response = oci.pagination.list_call_get_all_results(
@@ -364,7 +371,7 @@ def pick_existing_instance(compute: oci.core.ComputeClient) -> str | None:
 
 def capacity_report_has_room(
     compute: oci.core.ComputeClient, ad: str, shape_cfg: dict[str, Any]
-) -> bool | None:
+) -> Optional[bool]:
     """
     Probe AD capacity before launch.
 
@@ -644,6 +651,12 @@ if __name__ == "__main__":
 
     try:
         raise SystemExit(cycle_launch_requests())
+    except KeyboardInterrupt:
+        log_warning("Interrupted by user (Ctrl+C), shutting down cleanly")
+        if ACTIVE_UI and ACTIVE_UI.enabled:
+            ACTIVE_UI.set_state(phase="stopped", last_status="interrupted", last_error="-")
+            ACTIVE_UI.render(force=True)
+        raise SystemExit(130)
     except Exception as exc:  # pylint: disable=broad-except
         log_exception("Fatal error: %s", exc)
         if ACTIVE_UI and ACTIVE_UI.enabled:
