@@ -1,7 +1,9 @@
 """Retry OCI A1.Flex launch requests until an instance is RUNNING."""
 from __future__ import annotations
 
+import argparse
 import logging
+import logging.handlers
 import random
 import sys
 import time
@@ -23,7 +25,7 @@ logger = logging.getLogger("a1_flex_hunter")
 
 
 class TerminalUI:
-    """Single-screen terminal dashboard to avoid log scrolling."""
+    """Modern single-screen terminal dashboard."""
 
     def __init__(self, enabled: bool) -> None:
         self.enabled = bool(enabled and sys.stdout.isatty())
@@ -60,7 +62,18 @@ class TerminalUI:
             self._initialized = True
             curses.noecho()
             curses.cbreak()
+            curses.start_color()
+            curses.use_default_colors()
+            # Define color pairs: (pair_id, foreground, background)
+            curses.init_pair(1, curses.COLOR_CYAN, -1)   # Header / Labels
+            curses.init_pair(2, curses.COLOR_GREEN, -1)  # Success / Phase
+            curses.init_pair(3, curses.COLOR_YELLOW, -1) # Warning / Delay
+            curses.init_pair(4, curses.COLOR_RED, -1)    # Error
+            curses.init_pair(5, curses.COLOR_MAGENTA, -1)# Stats
+            
             self._screen.keypad(True)
+            self._screen.nodelay(True)
+            curses.curs_set(0) # Hide cursor
         except Exception:
             self.enabled = False
             self.close()
@@ -72,7 +85,12 @@ class TerminalUI:
 
     def add_event(self, level: str, message: str) -> None:
         ts = time.strftime("%H:%M:%S")
-        self._events.appendleft(f"{ts} [{level}] {message}")
+        color = 0
+        if level == "INFO": color = 2
+        elif level == "WARN": color = 3
+        elif level in ("ERROR", "EXCEPTION"): color = 4
+        
+        self._events.appendleft((ts, level, message, color))
         self.render()
 
     def _elapsed(self) -> str:
@@ -84,17 +102,19 @@ class TerminalUI:
 
     @staticmethod
     def _fit(text: str, width: int) -> str:
-        if width <= 0:
-            return ""
-        if len(text) <= width:
-            return text
-        if width == 1:
-            return text[:1]
-        return text[: width - 1] + "…"
+        if width <= 0: return ""
+        return text[:width-1] + "…" if len(text) > width else text
 
     def render(self, force: bool = False) -> None:
-        if not self.enabled or self._screen is None:
+        if not self.enabled or self._screen is None or self._curses is None:
             return
+
+        try:
+            ch = self._screen.getch()
+            if ch == self._curses.KEY_RESIZE:
+                force = True
+        except Exception:
+            pass
 
         now = time.monotonic()
         if not force and now - self._last_render < 0.1:
@@ -102,39 +122,95 @@ class TerminalUI:
         self._last_render = now
 
         try:
-            height, width = self._screen.getmaxyx()
-            content_width = max(10, width - 1)
-
-            lines = [
-                "OCI A1 Flex Hunter",
-                f"Elapsed: {self._elapsed()} | Phase: {self._state['phase']}",
-                f"Attempt: {self._state['attempt']} | AD: {self._state['ad']}",
-                f"Shape: {self._state['shape']} | Next delay: {self._state['next_delay']}",
-                (
-                    "Retries: {retries} | Throttles: {throttles} | Network: {network_errors} | "
-                    "Capacity skips: {capacity_skips}"
-                ).format(**self._state),
-                f"Instance: {self._state['instance_id']}",
-                f"Last status: {self._state['last_status']}",
-                f"Last error: {self._state['last_error']}",
-                "",
-                "Recent events:",
-            ]
-            lines.extend(list(self._events))
+            h, w = self._screen.getmaxyx()
+            if h < 15 or w < 60:
+                self._screen.erase()
+                self._screen.addstr(0, 0, "Terminal too small!")
+                self._screen.refresh()
+                return
 
             self._screen.erase()
-            for row, line in enumerate(lines[:height]):
-                self._screen.addnstr(row, 0, self._fit(line, content_width), content_width)
+            
+            # --- Header ---
+            header = " OCI A1 FLEX HUNTER "
+            self._screen.attron(self._curses.color_pair(1) | self._curses.A_BOLD)
+            self._screen.addstr(0, (w - len(header)) // 2, header)
+            self._screen.attroff(self._curses.color_pair(1) | self._curses.A_BOLD)
+            
+            # --- Status Box ---
+            self._draw_box(1, 1, 8, w - 2, " System Status ")
+            
+            # Column 1
+            self._add_stat(2, 4, "Phase:", self._state["phase"], 2)
+            self._add_stat(3, 4, "Elapsed:", self._elapsed(), 1)
+            self._add_stat(4, 4, "Attempt:", self._state["attempt"], 5)
+            self._add_stat(5, 4, "Next AD:", self._state["ad"], 1)
+            self._add_stat(6, 4, "Shape:", self._state["shape"], 1)
+
+            # Column 2
+            mid = w // 2
+            self._add_stat(2, mid, "Retries:", self._state["retries"], 5)
+            self._add_stat(3, mid, "Throttles:", self._state["throttles"], 3)
+            self._add_stat(4, mid, "Network Errs:", self._state["network_errors"], 4)
+            self._add_stat(5, mid, "Cap. Skips:", self._state["capacity_skips"], 3)
+            self._add_stat(6, mid, "Next Delay:", self._state["next_delay"], 3)
+
+            # --- Instance Info ---
+            self._screen.attron(self._curses.A_DIM)
+            inst_line = f" Instance: {self._state['instance_id']} | Last: {self._state['last_status']} "
+            self._screen.addnstr(8, 4, self._fit(inst_line, w - 8), w - 8)
+            if self._state["last_error"] != "-":
+                err_line = f" Error: {self._state['last_error']} "
+                self._screen.addnstr(9, 4, self._fit(err_line, w - 8), w - 8, self._curses.color_pair(4))
+            self._screen.attroff(self._A_DIM if hasattr(self, "_A_DIM") else self._curses.A_DIM)
+
+            # --- Events Log ---
+            self._draw_box(10, 1, h - 11, w - 2, " Recent Events ")
+            for i, (ts, lvl, msg, col) in enumerate(list(self._events)[:h-13]):
+                self._screen.attron(self._curses.color_pair(col))
+                line = f" {ts} [{lvl:5}] {msg}"
+                self._screen.addnstr(11 + i, 3, self._fit(line, w - 6), w - 6)
+                self._screen.attroff(self._curses.color_pair(col))
+
             self._screen.refresh()
         except Exception:
-            # If terminal rendering fails, disable TUI and continue in logging mode.
             self.enabled = False
             self.close()
+
+    def _draw_box(self, y, x, h, w, title=""):
+        try:
+            self._screen.attron(self._curses.A_DIM)
+            self._screen.attron(self._curses.color_pair(1))
+            self._screen.move(y, x)
+            self._screen.hline(self._curses.ACS_HLINE, w)
+            self._screen.move(y + h, x)
+            self._screen.hline(self._curses.ACS_HLINE, w)
+            self._screen.vline(y, x, self._curses.ACS_VLINE, h)
+            self._screen.vline(y, x + w, self._curses.ACS_VLINE, h)
+            self._screen.addch(y, x, self._curses.ACS_ULCORNER)
+            self._screen.addch(y, x + w, self._curses.ACS_URCORNER)
+            self._screen.addch(y + h, x, self._curses.ACS_LLCORNER)
+            self._screen.addch(y + h, x + w, self._curses.ACS_LRCORNER)
+            if title:
+                self._screen.addstr(y, x + 2, f" {title} ")
+            self._screen.attroff(self._curses.color_pair(1))
+            self._screen.attroff(self._curses.A_DIM)
+        except Exception: pass
+
+    def _add_stat(self, y, x, label, value, val_color_pair):
+        try:
+            self._screen.addstr(y, x, label, self._curses.A_DIM)
+            self._screen.attron(self._curses.color_pair(val_color_pair) | self._curses.A_BOLD)
+            self._screen.addstr(y, x + len(label) + 1, str(value))
+            self._screen.attroff(self._curses.color_pair(val_color_pair) | self._curses.A_BOLD)
+        except Exception: pass
 
     def close(self) -> None:
         if self._closed or not self._initialized or self._screen is None or self._curses is None:
             return
         try:
+            self._curses.curs_set(1)
+            self._screen.nodelay(False)
             self._curses.nocbreak()
             self._screen.keypad(False)
             self._curses.echo()
@@ -199,7 +275,8 @@ def setup_logging(console_output: bool) -> None:
     if log_file:
         path = Path(log_file)
         path.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(path))
+        # 5MB per file, keep 3 old logs
+        handlers.append(logging.handlers.RotatingFileHandler(path, maxBytes=5 * 1024 * 1024, backupCount=3))
 
     if not handlers:
         handlers.append(logging.NullHandler())
@@ -490,13 +567,26 @@ def wait_for_running(compute: oci.core.ComputeClient, instance_id: str) -> None:
         time.sleep(poll_delay)
 
 
-def cycle_launch_requests() -> int:
+def cycle_launch_requests(dry_run: bool = False) -> int:
     """Continuously try to create an instance until it reaches RUNNING."""
     validate_config()
     shapes = shape_priority()
 
     oci_config = oci.config.from_file(file_location=cfg.CONFIG_PATH, profile_name=cfg.CONFIG_PROFILE)
+    identity = oci.identity.IdentityClient(oci_config)
+    try:
+        user_name = identity.get_user(oci_config["user"]).data.name
+        log_info("Connected to OCI as user: %s", user_name)
+    except Exception as exc:
+        log_error("Failed to connect to OCI: %s", exc)
+        return 1
+
     compute = oci.core.ComputeClient(oci_config)
+
+    if dry_run:
+        log_info("Dry-run / validation successful. No instance will be launched.")
+        return 0
+
     pacer = RequestPacer()
 
     attempt = 0
@@ -642,7 +732,11 @@ def cycle_launch_requests() -> int:
 
 
 if __name__ == "__main__":
-    ACTIVE_UI = TerminalUI(enabled=bool(getattr(cfg, "ENABLE_TUI", True)))
+    parser = argparse.ArgumentParser(description="OCI A1 Flex Hunter")
+    parser.add_argument("--dry-run", "--validate", action="store_true", help="Validate config and connectivity without launching")
+    args = parser.parse_args()
+
+    ACTIVE_UI = TerminalUI(enabled=bool(getattr(cfg, "ENABLE_TUI", True)) and not args.dry_run)
     setup_logging(console_output=not ACTIVE_UI.enabled)
 
     if ACTIVE_UI.enabled:
@@ -650,7 +744,7 @@ if __name__ == "__main__":
         ACTIVE_UI.render(force=True)
 
     try:
-        raise SystemExit(cycle_launch_requests())
+        raise SystemExit(cycle_launch_requests(dry_run=args.dry_run))
     except KeyboardInterrupt:
         log_warning("Interrupted by user (Ctrl+C), shutting down cleanly")
         if ACTIVE_UI and ACTIVE_UI.enabled:
